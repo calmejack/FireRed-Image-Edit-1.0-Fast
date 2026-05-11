@@ -10,6 +10,12 @@ import json
 import html as html_lib
 from io import BytesIO
 from PIL import Image
+from app_ui import (
+    DEFAULT_OUTPUT_IMAGES,
+    build_output_count_options_html,
+    build_output_gallery_placeholders_html,
+    normalize_output_count,
+)
 from image_settings import ASPECT_RATIO_OPTIONS, resolve_output_dimensions
 
 MAX_SEED = np.iinfo(np.int32).max
@@ -147,6 +153,8 @@ ASPECT_RATIO_OPTIONS_HTML = "".join(
     f'<option value="{value}">{label}</option>'
     for value, label in ASPECT_RATIO_OPTIONS
 )
+OUTPUT_COUNT_OPTIONS_HTML = build_output_count_options_html()
+OUTPUT_GALLERY_HTML = build_output_gallery_placeholders_html()
 
 
 def b64_to_pil_list(b64_json_str):
@@ -172,6 +180,12 @@ def b64_to_pil_list(b64_json_str):
     return pil_images
 
 
+def pil_image_to_data_url(image):
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+
+
 def update_dimensions_on_upload(image, aspect_ratio="original"):
     if image is None:
         return 1024, 1024
@@ -179,7 +193,7 @@ def update_dimensions_on_upload(image, aspect_ratio="original"):
 
 
 @spaces.GPU
-def infer(images_b64_json, prompt, seed, randomize_seed, guidance_scale, steps, aspect_ratio, progress=gr.Progress(track_tqdm=True)):
+def infer(images_b64_json, prompt, seed, randomize_seed, guidance_scale, steps, aspect_ratio, output_count, progress=gr.Progress(track_tqdm=True)):
     gc.collect()
     torch.cuda.empty_cache()
     pil_images = b64_to_pil_list(images_b64_json)
@@ -189,16 +203,19 @@ def infer(images_b64_json, prompt, seed, randomize_seed, guidance_scale, steps, 
         raise gr.Error("Please enter an edit prompt.")
     if randomize_seed:
         seed = random.randint(0, MAX_SEED)
+    output_count = normalize_output_count(output_count)
     generator = torch.Generator(device=device).manual_seed(seed)
     negative_prompt = "worst quality, low quality, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, jpeg artifacts, signature, watermark, username, blurry"
     width, height = update_dimensions_on_upload(pil_images[0], aspect_ratio)
     try:
-        result_image = pipe(
+        result_images = pipe(
             image=pil_images, prompt=prompt, negative_prompt=negative_prompt,
             height=height, width=width, num_inference_steps=steps,
             generator=generator, true_cfg_scale=guidance_scale,
-        ).images[0]
-        return result_image, seed
+            num_images_per_prompt=output_count,
+        ).images
+        result_json = json.dumps([pil_image_to_data_url(img) for img in result_images])
+        return result_json, seed
     except Exception as e:
         raise e
     finally:
@@ -441,27 +458,38 @@ body:not(.dark) #custom-run-btn *{color:#ffffff!important;-webkit-text-fill-colo
 .gradio-container .btn-run,.gradio-container .btn-run *,.gradio-container #custom-run-btn,
 .gradio-container #custom-run-btn *{color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;fill:#ffffff!important}
 
-.output-frame{border-bottom:1px solid #27272a;display:flex;flex-direction:column;position:relative}
+.output-section{border-top:1px solid #27272a;padding:12px 16px}
+.output-frame{border:1px solid #27272a;border-radius:12px;overflow:hidden;display:flex;flex-direction:column;position:relative;background:#09090b}
 .output-frame .out-title{
-    padding:10px 20px;font-size:13px;font-weight:700;color:#ffffff!important;
+    padding:10px 14px;font-size:12px;font-weight:700;color:#ffffff!important;
     -webkit-text-fill-color:#ffffff!important;text-transform:uppercase;letter-spacing:.8px;
     border-bottom:1px solid rgba(39,39,42,.6);display:flex;align-items:center;justify-content:space-between;
 }
 .output-frame .out-title span{color:#ffffff!important;-webkit-text-fill-color:#ffffff!important}
 .output-frame .out-body{
-    flex:1;background:#09090b;display:flex;align-items:center;justify-content:center;
-    overflow:hidden;min-height:240px;position:relative;
+    background:#09090b;overflow:hidden;min-height:240px;position:relative;padding:14px;
 }
-.output-frame .out-body img{max-width:100%;max-height:460px;image-rendering:auto}
-.output-frame .out-placeholder{color:#3f3f46;font-size:13px;text-align:center;padding:20px}
-.out-download-btn{
-    display:none;align-items:center;justify-content:center;background:rgba(30,144,255,.1);
-    border:1px solid rgba(30,144,255,.2);border-radius:6px;cursor:pointer;padding:3px 10px;
-    font-size:11px;font-weight:500;color:#7CB8FF!important;gap:4px;height:24px;transition:all .15s;
+.output-grid{
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+    gap:12px;
 }
-.out-download-btn:hover{background:rgba(30,144,255,.2);border-color:rgba(30,144,255,.35);color:#ffffff!important}
-.out-download-btn.visible{display:inline-flex}
-.out-download-btn svg{width:12px;height:12px;fill:#7CB8FF}
+.output-card{
+    position:relative;min-height:220px;background:#18181b;border:1px solid #27272a;
+    border-radius:10px;overflow:hidden;display:flex;align-items:center;justify-content:center;
+}
+.output-card img{
+    width:100%;height:100%;min-height:220px;max-height:420px;object-fit:contain;background:#09090b;
+}
+.output-card-placeholder{
+    color:#52525b;font-size:13px;text-align:center;padding:20px;
+}
+.output-card-download{
+    position:absolute;top:10px;right:10px;display:inline-flex;align-items:center;justify-content:center;
+    gap:4px;background:rgba(15,23,42,.78);border:1px solid rgba(255,255,255,.12);border-radius:7px;
+    cursor:pointer;padding:5px 10px;font-size:11px;font-weight:600;color:#e4e4e7;z-index:2;transition:all .15s ease;
+}
+.output-card-download:hover{background:rgba(30,144,255,.92);border-color:rgba(30,144,255,1);color:#ffffff}
+.output-card-download svg{width:12px;height:12px;fill:currentColor}
 
 .modern-loader{
     display:none;position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(9,9,11,.92);
@@ -541,8 +569,6 @@ body:not(.dark) #custom-run-btn *{color:#ffffff!important;-webkit-text-fill-colo
 .dark .settings-group{background:#18181b}
 .dark .output-frame .out-title{color:#ffffff!important}
 .dark .output-frame .out-title span{color:#ffffff!important}
-.dark .out-download-btn{color:#7CB8FF!important}
-.dark .out-download-btn:hover{color:#ffffff!important}
 
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-track{background:#09090b}
@@ -573,6 +599,8 @@ function init() {
     const runBtnEl      = document.getElementById('custom-run-btn');
     const imgCountTb    = document.getElementById('tb-image-count');
     const imgCountSb    = document.getElementById('sb-image-count');
+    const outputGrid    = document.getElementById('output-grid');
+    const outputCountEl = document.getElementById('custom-output-count');
 
     if (!galleryGrid || !fileInput || !dropZone) {
         setTimeout(init, 250);
@@ -583,6 +611,7 @@ function init() {
 
     let images = [];
     window.__uploadedImages = images;
+    let outputImages = [];
     let selectedIdx = -1;
     let toastTimer = null;
 
@@ -642,6 +671,44 @@ function init() {
     function syncPromptToGradio() {
         if (promptInput) setGradioValue('prompt-gradio-input', promptInput.value);
     }
+
+    function renderOutputGallery() {
+        if (!outputGrid) return;
+        const selectedCount = outputCountEl ? parseInt(outputCountEl.value || '1', 10) : 1;
+        let html = '';
+        for (let i = 0; i < selectedCount; i++) {
+            const src = outputImages[i];
+            html += '<div class="output-card" data-output-idx="' + i + '">';
+            html += '<button class="output-card-download" data-output-idx="' + i + '" title="Download output ' + (i + 1) + '">'
+                 + 'Save</button>';
+            if (src) {
+                html += '<img src="' + src + '" alt="Output ' + (i + 1) + '">';
+            } else {
+                html += '<div class="output-card-placeholder">Result ' + (i + 1) + '</div>';
+            }
+            html += '</div>';
+        }
+        outputGrid.innerHTML = html;
+        outputGrid.querySelectorAll('.output-card-download').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const idx = parseInt(btn.dataset.outputIdx, 10);
+                const src = outputImages[idx];
+                if (!src) return;
+                const a = document.createElement('a');
+                a.href = src;
+                a.download = 'firered_output_' + (idx + 1) + '.png';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            });
+        });
+    }
+    window.__renderOutputGallery = renderOutputGallery;
+    window.__setOutputImages = function(newImages) {
+        outputImages = Array.isArray(newImages) ? newImages : [];
+        renderOutputGallery();
+    };
 
     function updateCounts() {
         const n = images.length;
@@ -802,6 +869,10 @@ function init() {
         update();
     }
     syncSelect('custom-aspect-ratio', 'gradio-aspect-ratio');
+    syncSelect('custom-output-count', 'gradio-output-count');
+    if (outputCountEl) {
+        outputCountEl.addEventListener('change', renderOutputGallery);
+    }
 
     const randCheck = document.getElementById('custom-randomize');
     if (randCheck) {
@@ -816,6 +887,9 @@ function init() {
     function showLoader() {
         const l = document.getElementById('output-loader');
         if (l) l.classList.add('active');
+        outputImages = [];
+        setGradioValue('gradio-result-data', '');
+        renderOutputGallery();
         const sb = document.querySelector('.sb-fixed');
         if (sb) sb.textContent = 'Processing...';
     }
@@ -852,6 +926,7 @@ function init() {
 
     renderGallery();
     updateCounts();
+    renderOutputGallery();
 }
 init();
 }
@@ -860,41 +935,29 @@ init();
 wire_outputs_js = r"""
 () => {
 function watchOutputs() {
-    const resultContainer = document.getElementById('gradio-result');
-    const outBody  = document.getElementById('output-image-container');
-    const outPh    = document.getElementById('output-placeholder');
-    const dlBtn    = document.getElementById('dl-btn-output');
+    const resultContainer = document.getElementById('gradio-result-data');
+    if (!resultContainer) { setTimeout(watchOutputs, 500); return; }
 
-    if (!resultContainer || !outBody) { setTimeout(watchOutputs, 500); return; }
+    let lastValue = '';
 
-    if (dlBtn) {
-        dlBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const img = outBody.querySelector('img.modern-out-img');
-            if (img && img.src) {
-                const a = document.createElement('a');
-                a.href = img.src; a.download = 'firered_output.png';
-                document.body.appendChild(a); a.click(); document.body.removeChild(a);
-            }
-        });
-    }
-
-    function syncImage() {
-        const resultImg = resultContainer.querySelector('img');
-        if (resultImg && resultImg.src) {
-            if (outPh) outPh.style.display = 'none';
-            let existing = outBody.querySelector('img.modern-out-img');
-            if (!existing) { existing = document.createElement('img'); existing.className = 'modern-out-img'; outBody.appendChild(existing); }
-            if (existing.src !== resultImg.src) {
-                existing.src = resultImg.src;
-                if (dlBtn) dlBtn.classList.add('visible');
-                if (window.__hideLoader) window.__hideLoader();
-            }
+    function syncOutputs() {
+        const el = resultContainer.querySelector('textarea') || resultContainer.querySelector('input');
+        if (!el) return;
+        const value = el.value;
+        if (!value || value === lastValue) return;
+        try {
+            const images = JSON.parse(value);
+            if (!Array.isArray(images)) return;
+            lastValue = value;
+            if (window.__setOutputImages) window.__setOutputImages(images);
+            if (window.__hideLoader) window.__hideLoader();
+        } catch (e) {
+            console.error('Output parse error:', e);
         }
     }
-    const observer = new MutationObserver(syncImage);
-    observer.observe(resultContainer, {childList:true, subtree:true, attributes:true, attributeFilter:['src']});
-    setInterval(syncImage, 800);
+    const observer = new MutationObserver(syncOutputs);
+    observer.observe(resultContainer, {childList:true, subtree:true, characterData:true, attributes:true});
+    setInterval(syncOutputs, 500);
 }
 watchOutputs();
 
@@ -978,7 +1041,8 @@ with gr.Blocks() as demo:
     guidance_scale = gr.Slider(minimum=1.0, maximum=10.0, step=0.1, value=1.0, elem_id="gradio-guidance", elem_classes="hidden-input", container=False)
     steps = gr.Slider(minimum=1, maximum=50, step=1, value=4, elem_id="gradio-steps", elem_classes="hidden-input", container=False)
     aspect_ratio = gr.Textbox(value="original", elem_id="gradio-aspect-ratio", elem_classes="hidden-input", container=False)
-    result = gr.Image(elem_id="gradio-result", elem_classes="hidden-input", container=False, format="png")
+    output_count = gr.Textbox(value=str(DEFAULT_OUTPUT_IMAGES), elem_id="gradio-output-count", elem_classes="hidden-input", container=False)
+    result_data = gr.Textbox(value="[]", elem_id="gradio-result-data", elem_classes="hidden-input", container=False)
 
     example_idx = gr.Textbox(value="", elem_id="example-idx-input", elem_classes="hidden-input", container=False)
     example_result = gr.Textbox(value="", elem_id="example-result-data", elem_classes="hidden-input", container=False)
@@ -1057,6 +1121,24 @@ with gr.Blocks() as demo:
                     </div>
                 </div>
 
+                <div class="output-section">
+                    <div class="output-frame">
+                        <div class="out-title">
+                            <span>Output</span>
+                        </div>
+                        <div class="out-body">
+                            <div class="modern-loader" id="output-loader">
+                                <div class="loader-spinner"></div>
+                                <div class="loader-text">Processing image...</div>
+                                <div class="loader-bar-track"><div class="loader-bar-fill"></div></div>
+                            </div>
+                            <div id="output-grid" class="output-grid">
+                                {OUTPUT_GALLERY_HTML}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="examples-section">
                     <div class="examples-title">Quick Examples</div>
                     <div class="examples-scroll">
@@ -1081,23 +1163,6 @@ with gr.Blocks() as demo:
                     </button>
                 </div>
 
-                <div class="output-frame" style="flex:1">
-                    <div class="out-title">
-                        <span>Output</span>
-                        <span id="dl-btn-output" class="out-download-btn" title="Download">
-                            {DOWNLOAD_SVG} Save
-                        </span>
-                    </div>
-                    <div class="out-body" id="output-image-container">
-                        <div class="modern-loader" id="output-loader">
-                            <div class="loader-spinner"></div>
-                            <div class="loader-text">Processing image...</div>
-                            <div class="loader-bar-track"><div class="loader-bar-fill"></div></div>
-                        </div>
-                        <div class="out-placeholder" id="output-placeholder">Result will appear here</div>
-                    </div>
-                </div>
-
                 <div class="settings-group">
                     <div class="settings-group-title">Advanced Settings</div>
                     <div class="settings-group-body">
@@ -1110,6 +1175,12 @@ with gr.Blocks() as demo:
                             <label for="custom-aspect-ratio">Ratio</label>
                             <select id="custom-aspect-ratio" class="modern-select">
                                 {ASPECT_RATIO_OPTIONS_HTML}
+                            </select>
+                        </div>
+                        <div class="select-row">
+                            <label for="custom-output-count">Output</label>
+                            <select id="custom-output-count" class="modern-select">
+                                {OUTPUT_COUNT_OPTIONS_HTML}
                             </select>
                         </div>
                         <div class="checkbox-row">
@@ -1150,17 +1221,19 @@ with gr.Blocks() as demo:
 
     run_btn.click(
         fn=infer,
-        inputs=[hidden_images_b64, prompt, seed, randomize_seed, guidance_scale, steps, aspect_ratio],
-        outputs=[result, seed],
-        js=r"""(imgs, p, s, rs, gs, st, ar) => {
+        inputs=[hidden_images_b64, prompt, seed, randomize_seed, guidance_scale, steps, aspect_ratio, output_count],
+        outputs=[result_data, seed],
+        js=r"""(imgs, p, s, rs, gs, st, ar, oc) => {
             const images = window.__uploadedImages || [];
             const b64Array = images.map(img => img.b64);
             const imgsJson = JSON.stringify(b64Array);
             const promptEl = document.getElementById('custom-prompt-input');
             const aspectRatioEl = document.getElementById('custom-aspect-ratio');
+            const outputCountEl = document.getElementById('custom-output-count');
             const promptVal = promptEl ? promptEl.value : p;
             const aspectRatioVal = aspectRatioEl ? aspectRatioEl.value : ar;
-            return [imgsJson, promptVal, s, rs, gs, st, aspectRatioVal];
+            const outputCountVal = outputCountEl ? outputCountEl.value : oc;
+            return [imgsJson, promptVal, s, rs, gs, st, aspectRatioVal, outputCountVal];
         }""",
     )
 
