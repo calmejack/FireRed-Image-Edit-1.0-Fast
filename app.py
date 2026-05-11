@@ -10,6 +10,7 @@ import json
 import html as html_lib
 from io import BytesIO
 from PIL import Image
+from image_settings import ASPECT_RATIO_OPTIONS, resolve_output_dimensions
 
 MAX_SEED = np.iinfo(np.int32).max
 LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
@@ -142,6 +143,10 @@ def load_example_data(idx_str):
 print("Building example thumbnails...")
 EXAMPLE_CARDS_HTML = build_example_cards_html()
 print(f"Built {len(EXAMPLES_CONFIG)} example cards.")
+ASPECT_RATIO_OPTIONS_HTML = "".join(
+    f'<option value="{value}">{label}</option>'
+    for value, label in ASPECT_RATIO_OPTIONS
+)
 
 
 def b64_to_pil_list(b64_json_str):
@@ -167,21 +172,14 @@ def b64_to_pil_list(b64_json_str):
     return pil_images
 
 
-def update_dimensions_on_upload(image):
+def update_dimensions_on_upload(image, aspect_ratio="original"):
     if image is None:
         return 1024, 1024
-    w, h = image.size
-    if w > h:
-        nw = 1024
-        nh = int(nw * h / w)
-    else:
-        nh = 1024
-        nw = int(nh * w / h)
-    return (nw // 8) * 8, (nh // 8) * 8
+    return resolve_output_dimensions(image, aspect_ratio)
 
 
 @spaces.GPU
-def infer(images_b64_json, prompt, seed, randomize_seed, guidance_scale, steps, progress=gr.Progress(track_tqdm=True)):
+def infer(images_b64_json, prompt, seed, randomize_seed, guidance_scale, steps, aspect_ratio, progress=gr.Progress(track_tqdm=True)):
     gc.collect()
     torch.cuda.empty_cache()
     pil_images = b64_to_pil_list(images_b64_json)
@@ -193,7 +191,7 @@ def infer(images_b64_json, prompt, seed, randomize_seed, guidance_scale, steps, 
         seed = random.randint(0, MAX_SEED)
     generator = torch.Generator(device=device).manual_seed(seed)
     negative_prompt = "worst quality, low quality, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, jpeg artifacts, signature, watermark, username, blurry"
-    width, height = update_dimensions_on_upload(pil_images[0])
+    width, height = update_dimensions_on_upload(pil_images[0], aspect_ratio)
     try:
         result_image = pipe(
             image=pil_images, prompt=prompt, negative_prompt=negative_prompt,
@@ -489,6 +487,13 @@ body:not(.dark) #custom-run-btn *{color:#ffffff!important;-webkit-text-fill-colo
     padding:10px 16px;border-bottom:1px solid #27272a;background:rgba(24,24,27,.5);
 }
 .settings-group-body{padding:14px 16px;display:flex;flex-direction:column;gap:12px}
+.select-row{display:flex;align-items:center;gap:10px;min-height:32px}
+.select-row label{font-size:13px;font-weight:500;color:#a1a1aa;min-width:72px;flex-shrink:0}
+.modern-select{
+    flex:1;background:#09090b;border:1px solid #27272a;border-radius:8px;
+    color:#e4e4e7;font-size:13px;padding:8px 10px;outline:none;min-width:0;
+}
+.modern-select:focus{border-color:#1E90FF;box-shadow:0 0 0 1px rgba(30,144,255,.25)}
 .slider-row{display:flex;align-items:center;gap:10px;min-height:28px}
 .slider-row label{font-size:13px;font-weight:500;color:#a1a1aa;min-width:72px;flex-shrink:0}
 .slider-row input[type="range"]{
@@ -789,6 +794,15 @@ function init() {
     syncSlider('custom-guidance', 'gradio-guidance');
     syncSlider('custom-steps', 'gradio-steps');
 
+    function syncSelect(customId, gradioId) {
+        const select = document.getElementById(customId);
+        if (!select) return;
+        const update = () => setGradioValue(gradioId, select.value);
+        select.addEventListener('change', update);
+        update();
+    }
+    syncSelect('custom-aspect-ratio', 'gradio-aspect-ratio');
+
     const randCheck = document.getElementById('custom-randomize');
     if (randCheck) {
         randCheck.addEventListener('change', () => {
@@ -963,6 +977,7 @@ with gr.Blocks() as demo:
     randomize_seed = gr.Checkbox(value=True, elem_id="gradio-randomize", elem_classes="hidden-input", container=False)
     guidance_scale = gr.Slider(minimum=1.0, maximum=10.0, step=0.1, value=1.0, elem_id="gradio-guidance", elem_classes="hidden-input", container=False)
     steps = gr.Slider(minimum=1, maximum=50, step=1, value=4, elem_id="gradio-steps", elem_classes="hidden-input", container=False)
+    aspect_ratio = gr.Textbox(value="original", elem_id="gradio-aspect-ratio", elem_classes="hidden-input", container=False)
     result = gr.Image(elem_id="gradio-result", elem_classes="hidden-input", container=False, format="png")
 
     example_idx = gr.Textbox(value="", elem_id="example-idx-input", elem_classes="hidden-input", container=False)
@@ -1091,6 +1106,12 @@ with gr.Blocks() as demo:
                             <input type="range" id="custom-seed" min="0" max="2147483647" step="1" value="0">
                             <span class="slider-val" id="custom-seed-val">0</span>
                         </div>
+                        <div class="select-row">
+                            <label for="custom-aspect-ratio">Ratio</label>
+                            <select id="custom-aspect-ratio" class="modern-select">
+                                {ASPECT_RATIO_OPTIONS_HTML}
+                            </select>
+                        </div>
                         <div class="checkbox-row">
                             <input type="checkbox" id="custom-randomize" checked>
                             <label for="custom-randomize">Randomize seed</label>
@@ -1129,15 +1150,17 @@ with gr.Blocks() as demo:
 
     run_btn.click(
         fn=infer,
-        inputs=[hidden_images_b64, prompt, seed, randomize_seed, guidance_scale, steps],
+        inputs=[hidden_images_b64, prompt, seed, randomize_seed, guidance_scale, steps, aspect_ratio],
         outputs=[result, seed],
-        js=r"""(imgs, p, s, rs, gs, st) => {
+        js=r"""(imgs, p, s, rs, gs, st, ar) => {
             const images = window.__uploadedImages || [];
             const b64Array = images.map(img => img.b64);
             const imgsJson = JSON.stringify(b64Array);
             const promptEl = document.getElementById('custom-prompt-input');
+            const aspectRatioEl = document.getElementById('custom-aspect-ratio');
             const promptVal = promptEl ? promptEl.value : p;
-            return [imgsJson, promptVal, s, rs, gs, st];
+            const aspectRatioVal = aspectRatioEl ? aspectRatioEl.value : ar;
+            return [imgsJson, promptVal, s, rs, gs, st, aspectRatioVal];
         }""",
     )
 
